@@ -15,29 +15,28 @@ local M = {}
 
 local config = {
   keymap = "<leader>pc",
-  width = 80,
+  height = 18,              -- chat panel height (lines)
   pi_cmd = { "pi", "--mode", "rpc", "--no-session" },
 }
 
 -- ─── State ────────────────────────────────────────────────────────────────
 
 local state = {
-  win = nil,
+  chat_win = nil,
+  input_win = nil,
   chat_buf = nil,
   input_buf = nil,
+  editor_win = nil,
   job_id = nil,
-  stdin = nil,
-  stdout = nil,
-  stderr = nil,
   is_streaming = false,
-  messages = {},       -- { role, content }
-  current_text = "",   -- accumulated streaming text
+  messages = {},
+  current_text = "",
 }
 
 -- ─── Process Management ───────────────────────────────────────────────────
 
 local function start_pi()
-  if state.job_id then return end
+  if state.job_id then return true end
 
   local on_stdout = function(_, data)
     for _, line in ipairs(data) do
@@ -49,9 +48,6 @@ local function start_pi()
 
   local on_exit = function(_, code, _)
     state.job_id = nil
-    state.stdin = nil
-    state.stdout = nil
-    state.stderr = nil
     if code ~= 0 then
       M._append_chat(string.format("⚠ Pi exited with code %d", code), "WarningMsg")
     end
@@ -70,19 +66,8 @@ local function start_pi()
     return false
   end
 
-  -- stdin/stdout file descriptors
-  state.stdin = state.job_id
-  -- For RPC mode, we write to stdin via chansend
   M._append_chat("▸ Connected to Pi", "Comment")
   return true
-end
-
-local function stop_pi()
-  if state.job_id then
-    vim.fn.chansend(state.stdin, '{"type": "quit"}\n')
-    vim.fn.jobstop(state.job_id)
-    state.job_id = nil
-  end
 end
 
 -- ─── Event Handling ───────────────────────────────────────────────────────
@@ -90,7 +75,6 @@ end
 function M._handle_event(raw_line)
   local ok, event = pcall(vim.json.decode, raw_line)
   if not ok then return end
-
   if not event or not event.type then return end
 
   if event.type == "message_update" and event.assistantMessageEvent then
@@ -103,7 +87,6 @@ function M._handle_event(raw_line)
   elseif event.type == "message_end" and event.message then
     local msg = event.message
     if msg.role == "assistant" then
-      -- Extract text from message
       local text = ""
       if msg.content then
         for _, part in ipairs(msg.content) do
@@ -139,46 +122,39 @@ end
 -- ─── UI ───────────────────────────────────────────────────────────────────
 
 local function create_chat_window()
-  -- Chat buffer (read-only, shows conversation)
+  -- Chat buffer (read-only conversation)
   state.chat_buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_set_option_value("modifiable", false, { buf = state.chat_buf })
   vim.api.nvim_set_option_value("buftype", "nofile", { buf = state.chat_buf })
 
-  -- Input buffer (for typing messages)
+  -- Input buffer
   state.input_buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_set_option_value("buftype", "nofile", { buf = state.input_buf })
   vim.api.nvim_buf_set_lines(state.input_buf, 0, -1, false, { "" })
 
-  -- Layout: vertical split
-  local total_width = vim.o.columns
-  local chat_width = math.min(config.width, math.floor(total_width * 0.5))
-  local right_col = total_width - chat_width
+  -- Save editor window to restore later
+  state.editor_win = vim.api.nvim_get_current_win()
 
-  -- Create the chat window
-  state.win = vim.api.nvim_open_win(state.chat_buf, false, {
-    relative = "editor",
-    style = "minimal",
-    width = chat_width,
-    height = vim.o.lines - 3,
-    row = 0,
-    col = right_col,
-    border = "single",
-  })
+  -- Split horizontally: chat on bottom
+  vim.cmd(string.format("belowright %dsplit", config.height))
+  state.chat_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(state.chat_win, state.chat_buf)
 
-  -- Input window below
-  local input_win = vim.api.nvim_open_win(state.input_buf, true, {
-    relative = "editor",
-    style = "minimal",
-    width = chat_width,
-    height = 2,
-    row = vim.o.lines - 3,
-    col = right_col,
-    border = "single",
-  })
+  -- Split input below chat
+  vim.cmd("belowright 2split")
+  state.input_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(state.input_win, state.input_buf)
+
+  -- Go back to editor
+  vim.api.nvim_set_current_win(state.editor_win)
 
   -- Window options
-  vim.api.nvim_set_option_value("wrap", true, { win = state.win })
-  vim.api.nvim_set_option_value("cursorline", true, { win = input_win })
+  vim.api.nvim_set_option_value("wrap", true, { win = state.chat_win })
+  vim.api.nvim_set_option_value("number", false, { win = state.chat_win })
+  vim.api.nvim_set_option_value("relativenumber", false, { win = state.chat_win })
+  vim.api.nvim_set_option_value("signcolumn", "no", { win = state.chat_win })
+  vim.api.nvim_set_option_value("foldcolumn", "0", { win = state.chat_win })
+  vim.api.nvim_set_option_value("cursorline", true, { win = state.input_win })
 
   -- Keymaps for input buffer
   vim.keymap.set("i", "<CR>", M.send_message, { buffer = state.input_buf, nowait = true })
@@ -186,14 +162,14 @@ local function create_chat_window()
   vim.keymap.set("n", "q", M.close, { buffer = state.input_buf, nowait = true })
   vim.keymap.set("n", "<Esc>", M.close, { buffer = state.input_buf, nowait = true })
 
-  -- Status line hint
-  vim.api.nvim_set_option_value("statusline", " Pi Chat — Enter to send, Esc to close ", { win = input_win })
-
+  vim.api.nvim_set_option_value("statusline", " Pi Chat — Enter to send, Esc/q to close ", { win = state.input_win })
   M._update_status()
 end
 
 function M._append_chat(text, hl_group)
   if not state.chat_buf then return end
+
+  vim.api.nvim_set_option_value("modifiable", true, { buf = state.chat_buf })
 
   local lines = vim.split(text, "\n")
   vim.api.nvim_buf_set_lines(state.chat_buf, -1, -1, false, lines)
@@ -206,29 +182,35 @@ function M._append_chat(text, hl_group)
     end
   end
 
+  vim.api.nvim_set_option_value("modifiable", false, { buf = state.chat_buf })
+
   -- Scroll to bottom
-  vim.api.nvim_win_set_cursor(state.win, { vim.api.nvim_buf_line_count(state.chat_buf), 0 })
+  if state.chat_win and vim.api.nvim_win_is_valid(state.chat_win) then
+    vim.api.nvim_win_set_cursor(state.chat_win, { vim.api.nvim_buf_line_count(state.chat_buf), 0 })
+  end
 end
 
 function M._redraw_current()
-  -- Clear the "streaming..." line and redraw current text
   if not state.chat_buf then return end
   local line_count = vim.api.nvim_buf_line_count(state.chat_buf)
-  -- Remove last line (previous partial render)
+
+  vim.api.nvim_set_option_value("modifiable", true, { buf = state.chat_buf })
   vim.api.nvim_buf_set_lines(state.chat_buf, line_count - 1, -1, false, {})
+  vim.api.nvim_set_option_value("modifiable", false, { buf = state.chat_buf })
+
   M._append_chat(state.current_text, "")
 end
 
 function M._update_status()
-  if not state.input_buf then return end
+  if not state.input_win or not vim.api.nvim_win_is_valid(state.input_win) then return end
   local status = state.is_streaming and " ⏳ Thinking..." or " ▸ Ready"
-  vim.api.nvim_set_option_value("statusline", " Pi Chat" .. status .. " — Enter to send, Esc/q to close ", { win = vim.fn.win_findbuf(state.input_buf)[1] })
+  vim.api.nvim_set_option_value("statusline", " Pi Chat" .. status .. " — Enter to send, Esc/q to close ", { win = state.input_win })
 end
 
 -- ─── Public API ───────────────────────────────────────────────────────────
 
 function M.toggle()
-  if state.win and vim.api.nvim_win_is_valid(state.win) then
+  if state.chat_win and vim.api.nvim_win_is_valid(state.chat_win) then
     M.close()
   else
     M.open()
@@ -236,7 +218,7 @@ function M.toggle()
 end
 
 function M.open()
-  if state.win and vim.api.nvim_win_is_valid(state.win) then
+  if state.chat_win and vim.api.nvim_win_is_valid(state.chat_win) then
     return
   end
 
@@ -259,30 +241,34 @@ function M.open()
 end
 
 function M.close()
-  if state.win and vim.api.nvim_win_is_valid(state.win) then
-    vim.api.nvim_win_close(state.win, true)
+  -- Close chat window
+  if state.chat_win and vim.api.nvim_win_is_valid(state.chat_win) then
+    vim.api.nvim_win_close(state.chat_win, true)
   end
 
-  local input_wins = vim.fn.win_findbuf(state.input_buf)
-  if input_wins and #input_wins > 0 then
-    for _, w in ipairs(input_wins) do
-      vim.api.nvim_win_close(w, true)
-    end
+  -- Close input window
+  if state.input_win and vim.api.nvim_win_is_valid(state.input_win) then
+    vim.api.nvim_win_close(state.input_win, true)
   end
 
-  state.win = nil
+  state.chat_win = nil
+  state.input_win = nil
   state.chat_buf = nil
   state.input_buf = nil
 
-  -- Don't kill the Pi process — keep it alive for next time
-  -- Call stop_pi() if you want to kill it on close
+  -- Focus back to editor
+  if state.editor_win and vim.api.nvim_win_is_valid(state.editor_win) then
+    vim.api.nvim_set_current_win(state.editor_win)
+  end
+
+  -- Keep Pi process alive
 end
 
 function M.send_message()
   if not state.input_buf then return end
 
   local lines = vim.api.nvim_buf_get_lines(state.input_buf, 0, -1, false)
-  local msg = table.concat(lines, "\n"):gsub("^%s*(.-)%s*$", "%1") -- trim
+  local msg = table.concat(lines, "\n"):gsub("^%s*(.-)%s*$", "%1")
   if msg == "" then return end
 
   -- Clear input
@@ -299,7 +285,7 @@ function M.send_message()
   M._update_status()
 
   local json = vim.json.encode({ type = "prompt", message = msg })
-  vim.fn.chansend(state.stdin, json .. "\n")
+  vim.fn.chansend(state.job_id, json .. "\n")
 end
 
 -- ─── Setup ────────────────────────────────────────────────────────────────

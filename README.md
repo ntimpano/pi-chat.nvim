@@ -13,16 +13,19 @@ Interactive chat with [Pi coding agent](https://github.com/earendil-works/pi-cod
 ## Demo
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  Neovim Editor          │ Pi Chat  ▸ Ready           │
-│                           │                           │
-│  Your code here...        │ You: explain this file    │
-│                           │                           │
-│                           │ Pi: This is a ...         │
-│                           │                           │
-│───────────────────────────│────────────────────────── │
-│                           │ Pi Chat — Enter/Esc       │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│                                                  │
+│  Your code editor here...                        │
+│                                                  │
+│  ────────────────────────────────────────────── │
+│  Pi Chat  ▸ Ready                               │
+│                                                  │
+│  You: explain this file                          │
+│  Pi: This is a Lua module that...                │
+│                                                  │
+│  ────────────────────────────────────────────── │
+│  Pi Chat — Enter to send, Esc/q to close         │
+└──────────────────────────────────────────────────┘
 ```
 
 ## Installation
@@ -66,7 +69,7 @@ use {
 ```lua
 require("pi-chat").setup({
   keymap = "<leader>pc",       -- toggle keybinding
-  width = 80,                   -- chat panel width
+  height = 18,                  -- chat panel height (lines)
   pi_cmd = { "pi", "--mode", "rpc", "--no-session" },  -- Pi command
 })
 ```
